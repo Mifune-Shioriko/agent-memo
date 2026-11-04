@@ -1,0 +1,103 @@
+import contextlib
+import io
+from pathlib import Path
+import sqlite3
+import tempfile
+import unittest
+
+from simple_codex_memory.cli import main
+
+
+class MemoryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.run_cli("init")
+
+    def run_cli(self, *args, code=0):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            result = main(["--root", str(self.root), *args])
+        self.assertEqual(result, code, err.getvalue())
+        return out.getvalue()
+
+    def write(self, name, text):
+        path = self.root / ".memory" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def test_init_preserves_notes_and_no_activation(self):
+        self.write("summary.md", "# Actual work\n")
+        self.run_cli("init")
+        self.assertIn("Actual work", self.run_cli("context"))
+        self.assertFalse((self.root / "AGENTS.md").exists())
+        self.assertFalse((self.root / ".memory" / "enabled").exists())
+
+    def test_search_refreshes_edits_deletions_and_has_source_lines(self):
+        self.write("topic.md", "# Intro\n\n## Auth\nUse rotating tokens.\n")
+        result = self.run_cli("search", "rotating tokens")
+        self.assertIn(".memory/topic.md:3", result)
+        self.write("topic.md", "# Auth\nUse passkeys instead.\n")
+        self.assertIn("No matching", self.run_cli("search", "rotating"))
+        self.assertIn("passkeys", self.run_cli("search", "passkeys"))
+        (self.root / ".memory/topic.md").unlink()
+        self.assertIn("No matching", self.run_cli("search", "passkeys"))
+
+    def test_chinese_and_literal_queries(self):
+        self.write("decisions.md", "# 数据库\n项目认证采用短期令牌，不记录密码。\n")
+        self.assertIn("短期令牌", self.run_cli("search", "认证"))
+        self.assertIn("短期令牌", self.run_cli("search", "认证 令牌"))
+        self.run_cli("search", '" OR * : - (')
+
+    def test_rebuild_after_cache_removed(self):
+        self.write("lessons.md", "# Cache\nRebuildable evidence.\n")
+        self.run_cli("context")
+        (self.root / ".memory/index.sqlite").unlink()
+        self.assertIn("evidence", self.run_cli("search", "evidence"))
+        self.run_cli("reindex")
+        self.assertIn("evidence", self.run_cli("search", "evidence"))
+
+    def test_check_and_bounded_output(self):
+        self.write("summary.md", "x\n" * 101)
+        self.assertIn("summary.md", self.run_cli("check", code=1))
+        self.assertLessEqual(len(self.run_cli("context", "--max-chars", "30").rstrip("\n")), 30)
+        self.assertLessEqual(len(self.run_cli("search", "x", "--max-chars", "8").rstrip("\n")), 8)
+
+    def test_no_parent_project_discovery(self):
+        child = self.root / "child"
+        child.mkdir()
+        self.root = child
+        self.run_cli("context", code=2)
+        self.assertFalse((child / ".memory").exists())
+
+    def test_symlinks_not_read_or_written(self):
+        outside = self.root / "outside.md"
+        outside.write_text("secretvalue", encoding="utf-8")
+        (self.root / ".memory/link.md").symlink_to(outside)
+        self.assertIn("No matching", self.run_cli("search", "secretvalue"))
+        (self.root / ".memory/index.sqlite").unlink()
+        (self.root / ".memory/index.sqlite").symlink_to(outside)
+        self.run_cli("context", code=2)
+        self.assertEqual(outside.read_text(), "secretvalue")
+
+    def test_skill_install_contains_explicit_only_policy(self):
+        destination = self.root / "skills"
+        self.run_cli("install-skill", "--dest", str(destination))
+        skill = destination / "simple-codex-memory"
+        self.assertIn("allow_implicit_invocation: false", (skill / "agents/openai.yaml").read_text())
+        self.assertTrue((skill / "SKILL.md").is_file())
+        self.run_cli("install-skill", "--dest", str(destination), code=2)
+
+    def test_fenced_headings_do_not_split_sections(self):
+        self.write("topic.md", "# Shell\n```bash\n# comment\necho marker\n```\n")
+        self.assertIn("topic.md:1", self.run_cli("search", "marker"))
+
+    def test_index_is_fts5(self):
+        self.run_cli("context")
+        with sqlite3.connect(self.root / ".memory/index.sqlite") as db:
+            self.assertIn("fts5", db.execute("SELECT sql FROM sqlite_master WHERE name='chunks'").fetchone()[0])
+
+
+if __name__ == "__main__":
+    unittest.main()
