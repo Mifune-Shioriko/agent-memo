@@ -55,6 +55,9 @@ memory --root /path/to/project search "认证 令牌"
 memory --root /path/to/project search "refresh token" --limit 3 --max-chars 4000
 memory --root /path/to/project check
 memory --root /path/to/project reindex
+memory projects
+memory projects --json
+memory projects --prune
 ```
 
 | 命令 | 作用 |
@@ -65,12 +68,46 @@ memory --root /path/to/project reindex
 | `check` | 检查必需文件与篇幅预算，不自动改写内容 |
 | `reindex` | 从 Markdown 全量重建 SQLite 缓存 |
 | `install-skill` | 安装只允许显式调用的 skill |
+| `projects` | 列出全局登记的项目和 memory 路径，标记目录是否存在 |
 
 搜索先使用 FTS5 排序，再用子串匹配补充结果，支持中文短词。查询按普通关键词
 处理，不接受 FTS 运算符；多个词需同时匹配。返回文件和段落起始行，较长段落会截断，
 需要时按定位读取原文。这里没有语义检索、中文分词模型或跨语言匹配。
 
 退出码：`0` 成功（包括搜索无结果），`1` 检查发现问题，`2` 命令或运行错误。
+
+## 全局目录
+
+全局目录默认保存在 `~/.local/share/simple-codex-memory/projects.json`；设置了
+`XDG_DATA_HOME` 时改用 `$XDG_DATA_HOME/simple-codex-memory/projects.json`。
+也可在子命令前用 `--registry /absolute/path/projects.json` 指定位置。
+这是一个普通 JSON 文件，只记录位置，不保存笔记内容，也不使用数据库：
+
+```json
+{
+  "version": 1,
+  "projects": [
+    {
+      "root": "/path/to/project",
+      "memory_dir": "/path/to/project/.memory"
+    }
+  ]
+}
+```
+
+`init`、`context`、`search`、`check`、`reindex` 成功后自动登记项目；同一项目的
+路径会规范化并去重。已有 memory 在下次成功使用时补登记，不扫描磁盘或读取其他
+项目笔记。目录列表不会启用其他项目的记忆，启用范围仍由当前会话的显式调用决定。
+
+`memory projects` 不需要 `--root`，只查询登记路径的当前状态，不创建 memory。
+`--json` 输出附有 `status` 的结构化列表；`available` 表示 `.memory` 目录存在且
+不是符号链接，不代表笔记通过 `check`。`missing` 项默认保留，便于识别项目移动、
+删除或磁盘未挂载的情况；确认不再需要后，可用 `memory projects --prune` 清除这些
+条目。移动项目后，在新位置运行一次项目命令即可登记新路径，再按需清理旧记录。
+
+登记使用文件锁和原子替换，避免并发更新丢失条目或留下半截 JSON。索引损坏或格式
+版本不支持时，命令会报错并保留原文件；项目操作可能已完成，修复目录文件后重试即可。
+全局目录删除后可随项目使用逐步重建；它不会自动恢复全部历史位置。
 
 ## 存储与约束
 

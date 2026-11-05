@@ -1,7 +1,11 @@
 import contextlib
 import io
+import json
+import os
 from pathlib import Path
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -13,12 +17,13 @@ class MemoryTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        self.registry = self.root / "global" / "projects.json"
         self.run_cli("init")
 
     def run_cli(self, *args, code=0):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            result = main(["--root", str(self.root), *args])
+            result = main(["--root", str(self.root), "--registry", str(self.registry), *args])
         self.assertEqual(result, code, err.getvalue())
         return out.getvalue()
 
@@ -97,6 +102,70 @@ class MemoryTests(unittest.TestCase):
         self.run_cli("context")
         with sqlite3.connect(self.root / ".memory/index.sqlite") as db:
             self.assertIn("fts5", db.execute("SELECT sql FROM sqlite_master WHERE name='chunks'").fetchone()[0])
+
+    def test_registry_contains_only_locations_and_deduplicates_roots(self):
+        self.write("summary.md", "Private project details")
+        self.run_cli("context")
+        self.run_cli("check")
+        self.run_cli("init")
+        data = json.loads(self.registry.read_text())
+        self.assertEqual(data, {"version": 1, "projects": [
+            {"root": str(self.root), "memory_dir": str(self.root / ".memory")}]})
+        self.root = self.root / ".." / self.root.name
+        self.run_cli("context")
+        self.assertEqual(json.loads(self.registry.read_text()), data)
+
+    def test_existing_memory_registers_on_use(self):
+        self.registry.unlink()
+        self.run_cli("context")
+        self.assertEqual(json.loads(self.registry.read_text())["projects"][0]["root"], str(self.root))
+        self.registry.unlink()
+        self.root = self.root / "unrelated"
+        self.run_cli("context", code=2)
+        self.assertFalse(self.registry.exists())
+
+    def test_list_missing_and_explicit_prune(self):
+        directory = self.root / ".memory"
+        directory.rename(self.root / "moved-memory")
+        before = self.registry.read_bytes()
+        result = json.loads(self.run_cli("projects", "--json"))
+        self.assertEqual(result["projects"][0]["status"], "missing")
+        self.assertEqual(self.registry.read_bytes(), before)
+        self.assertFalse(directory.exists())
+        self.assertEqual(json.loads(self.run_cli("projects", "--prune", "--json"))["projects"], [])
+
+    def test_corrupt_and_future_registry_preserved(self):
+        for content in ("broken json", '{"version": 2, "projects": []}',
+                        '{"version": 1, "projects": [{}]}'):
+            self.registry.write_text(content)
+            self.run_cli("init", code=2)
+            self.assertEqual(self.registry.read_text(), content)
+            self.run_cli("projects", code=2)
+
+    def test_registry_symlink_not_overwritten(self):
+        outside = self.root / "outside.json"
+        outside.write_text("keep")
+        self.registry.unlink()
+        self.registry.symlink_to(outside)
+        self.run_cli("init", code=2)
+        self.assertEqual(outside.read_text(), "keep")
+
+    def test_concurrent_registration_keeps_every_project(self):
+        processes = []
+        for i in range(8):
+            command = [sys.executable, "-m", "simple_codex_memory", "--root", str(self.root / str(i)),
+                       "--registry", str(self.registry), "init"]
+            processes.append(subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                              env=dict(os.environ)))
+        for process in processes:
+            _, err = process.communicate(timeout=20)
+            self.assertEqual(process.returncode, 0, err.decode())
+        self.assertEqual(len(json.loads(self.registry.read_text())["projects"]), 9)
+
+    def test_empty_registry_list_does_not_create_files(self):
+        self.registry = self.root / "unused" / "projects.json"
+        self.assertEqual(json.loads(self.run_cli("projects", "--json"))["projects"], [])
+        self.assertFalse(self.registry.parent.exists())
 
 
 if __name__ == "__main__":

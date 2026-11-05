@@ -2,11 +2,14 @@
 
 import argparse
 import hashlib
+import json
 from importlib.resources import files
 import re
 from pathlib import Path
 import sqlite3
 import sys
+
+from .registry import default_registry, list_projects, register
 
 TEMPLATES = {
     "summary.md": "# Project memory\n\n## Goal\n\n## Current state\n\n## Blockers\n\n## Next steps\n",
@@ -115,6 +118,7 @@ def positive(value):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path.cwd(), help="exact project root; defaults to cwd, never searches parents")
+    parser.add_argument("--registry", type=Path, default=default_registry(), help="global project registry JSON path")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init", help="create missing templates without overwriting notes")
     context = sub.add_parser("context", help="show bounded summary; refresh index")
@@ -125,10 +129,24 @@ def main(argv=None):
     find.add_argument("--max-chars", type=positive, default=6000)
     sub.add_parser("reindex", help="rebuild disposable SQLite cache from Markdown")
     sub.add_parser("check", help="check required notes and size budgets")
+    projects = sub.add_parser("projects", help="list registered memory locations without reading notes")
+    projects.add_argument("--json", action="store_true", help="output locations and current availability as JSON")
+    projects.add_argument("--prune", action="store_true", help="remove entries whose memory directory is missing or a symlink")
     install = sub.add_parser("install-skill", help="copy explicit-only skill to a specified skills directory")
     install.add_argument("--dest", type=Path, default=Path.home() / ".agents" / "skills")
     args = parser.parse_args(argv)
     try:
+        # Do not resolve the final registry component: reject symlinks instead.
+        registry = args.registry.expanduser().absolute()
+        if args.command == "projects":
+            entries = list_projects(registry, prune=args.prune)
+            if args.json:
+                print(json.dumps({"version": 1, "projects": entries}, ensure_ascii=False, indent=2))
+            else:
+                print(f"Registry: {registry}")
+                print("\n".join(f"[{entry['status']}] {entry['root']} -> {entry['memory_dir']}" for entry in entries)
+                      or "No registered project memory.")
+            return 0
         if args.command == "install-skill":
             target = args.dest.expanduser() / "simple-codex-memory"
             if target.exists() or target.is_symlink():
@@ -153,6 +171,7 @@ def main(argv=None):
                         stream.write(text)
                 except FileExistsError:
                     pass
+            register(registry, root)
             print(f"Initialized {directory}; existing files preserved. Memory remains opt-in.")
             return 0
         if args.command == "check":
@@ -168,6 +187,8 @@ def main(argv=None):
                 if len(content.splitlines()) > cap or len(content) > cap * 100:
                     problems.append(f"{name}: exceeds {cap} lines or {cap * 100} characters; condense or split")
             print("\n".join(problems) if problems else "Memory checks passed.")
+            if not problems:
+                register(registry, root)
             return 1 if problems else 0
         db = connect(directory, rebuild=args.command == "reindex")
         try:
@@ -188,6 +209,7 @@ def main(argv=None):
                 print(bounded(output or "No matching memory.", args.max_chars))
         finally:
             db.close()
+        register(registry, root)
         return 0
     except (OSError, ValueError, sqlite3.Error) as exc:
         print(f"memory: {exc}", file=sys.stderr)
