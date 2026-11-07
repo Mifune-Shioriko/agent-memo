@@ -4,12 +4,22 @@ from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 
 
 def default_registry():
     base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
-    return base / "simple-codex-memory" / "projects.json"
+    new_path = base / "agent-memo" / "projects.json"
+    old_path = base / "simple-codex-memory" / "projects.json"
+    if not new_path.exists() and old_path.exists():
+        try:
+            new_path.parent.mkdir(parents=True, exist_ok=True)
+            new_path.write_text(old_path.read_text(encoding="utf-8"), encoding="utf-8")
+        except Exception:
+            return old_path
+    return new_path
+
 
 
 @contextmanager
@@ -49,20 +59,29 @@ def read_registry(path):
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("projects"), list):
         raise ValueError(f"Invalid registry format: {path}; existing file preserved")
-    roots = set()
+    memory_dirs = set()
     for entry in data["projects"]:
         if (not isinstance(entry, dict)
                 or not isinstance(entry.get("root"), str)
                 or not Path(entry["root"]).is_absolute()
-                or entry.get("memory_dir") != str(Path(entry["root"]) / ".memory")
-                or entry["root"] in roots):
+                or not isinstance(entry.get("memory_dir"), str)
+                or not Path(entry["memory_dir"]).is_absolute()):
             raise ValueError(f"Invalid registry entry: {path}; existing file preserved")
-        roots.add(entry["root"])
+        profile = entry.get("profile")
+        if profile is not None:
+            if not isinstance(profile, str) or not re.match(r"^[a-zA-Z0-9_\-]+$", profile):
+                raise ValueError(f"Invalid registry entry: {path}; existing file preserved")
+            expected_dir = str(Path(entry["root"]) / f".memory.{profile}")
+        else:
+            expected_dir = str(Path(entry["root"]) / ".memory")
+        if entry["memory_dir"] != expected_dir or entry["memory_dir"] in memory_dirs:
+            raise ValueError(f"Invalid registry entry: {path}; existing file preserved")
+        memory_dirs.add(entry["memory_dir"])
     return data["projects"]
 
 
 def write_registry(path, projects):
-    data = {"version": 1, "projects": sorted(projects, key=lambda entry: entry["root"])}
+    data = {"version": 1, "projects": sorted(projects, key=lambda entry: (entry["root"], entry.get("profile") or ""))}
     # Replace only after a complete write, on the same filesystem.
     temporary = None
     try:
@@ -79,13 +98,26 @@ def write_registry(path, projects):
             temporary.unlink(missing_ok=True)
 
 
-def register(path, root):
+def register(path, root, profile=None):
     with locked(path):
         projects = read_registry(path)
-        entry = {"root": str(root), "memory_dir": str(root / ".memory")}
+        mem_dir = str(root / (f".memory.{profile}" if profile else ".memory"))
+        entry = {"root": str(root), "memory_dir": mem_dir}
+        if profile:
+            entry["profile"] = profile
         if entry not in projects:
+            projects = [p for p in projects if p.get("memory_dir") != mem_dir]
             projects.append(entry)
             write_registry(path, projects)
+
+
+def unregister(path, memory_dir_path):
+    with locked(path):
+        projects = read_registry(path)
+        target = str(memory_dir_path)
+        kept = [p for p in projects if p.get("memory_dir") != target]
+        if len(kept) != len(projects):
+            write_registry(path, kept)
 
 
 def list_projects(path, prune=False):
@@ -102,4 +134,5 @@ def list_projects(path, prune=False):
             projects = kept
     else:
         projects = read_registry(path)
-    return [dict(entry, status=status(entry)) for entry in sorted(projects, key=lambda entry: entry["root"])]
+    return [dict(entry, status=status(entry)) for entry in sorted(projects, key=lambda entry: (entry["root"], entry.get("profile") or ""))]
+

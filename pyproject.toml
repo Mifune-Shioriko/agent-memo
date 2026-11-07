@@ -3,16 +3,19 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "simple-codex-memory"
-version = "0.1.0"
-description = "Opt-in project memory for Codex: Markdown, SQLite, and a small skill."
+name = "agent-memo"
+version = "0.2.0"
+description = "Opt-in project memory for AI coding agents: Markdown, SQLite, and a small skill."
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{name = "Mifune-Shioriko"}]
 dependencies = []
 
 [project.scripts]
-memory = "simple_codex_memory.cli:main"
+memo = "agent_memo.cli:main"
+memory = "agent_memo.cli:main"
+agent-memo = "agent_memo.cli:main"
 
 [tool.setuptools.package-data]
-simple_codex_memory = ["skill/SKILL.md", "skill/agents/openai.yaml"]
+agent_memo = ["skill/SKILL.md", "skill/agents/openai.yaml"]
+

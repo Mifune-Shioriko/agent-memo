@@ -9,7 +9,8 @@ import sys
 import tempfile
 import unittest
 
-from simple_codex_memory.cli import main
+from agent_memo.cli import main
+
 
 
 class MemoryTests(unittest.TestCase):
@@ -89,7 +90,7 @@ class MemoryTests(unittest.TestCase):
     def test_skill_install_contains_explicit_only_policy(self):
         destination = self.root / "skills"
         self.run_cli("install-skill", "--dest", str(destination))
-        skill = destination / "simple-codex-memory"
+        skill = destination / "agent-memo"
         self.assertIn("allow_implicit_invocation: false", (skill / "agents/openai.yaml").read_text())
         self.assertTrue((skill / "SKILL.md").is_file())
         self.run_cli("install-skill", "--dest", str(destination), code=2)
@@ -153,7 +154,7 @@ class MemoryTests(unittest.TestCase):
     def test_concurrent_registration_keeps_every_project(self):
         processes = []
         for i in range(8):
-            command = [sys.executable, "-m", "simple_codex_memory", "--root", str(self.root / str(i)),
+            command = [sys.executable, "-m", "agent_memo", "--root", str(self.root / str(i)),
                        "--registry", str(self.registry), "init"]
             processes.append(subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                               env=dict(os.environ)))
@@ -162,10 +163,68 @@ class MemoryTests(unittest.TestCase):
             self.assertEqual(process.returncode, 0, err.decode())
         self.assertEqual(len(json.loads(self.registry.read_text())["projects"]), 9)
 
+
     def test_empty_registry_list_does_not_create_files(self):
         self.registry = self.root / "unused" / "projects.json"
         self.assertEqual(json.loads(self.run_cli("projects", "--json"))["projects"], [])
         self.assertFalse(self.registry.parent.exists())
+
+    def test_profile_isolation_and_registration(self):
+        self.run_cli("--profile", "career", "init")
+        career_dir = self.root / ".memory.career"
+        self.assertTrue(career_dir.is_dir())
+        (career_dir / "summary.md").write_text("# Career Goal\n", encoding="utf-8")
+        self.assertIn("Career Goal", self.run_cli("--profile", "career", "context"))
+        self.assertNotIn("Career Goal", self.run_cli("context"))
+
+        projects = json.loads(self.run_cli("projects", "--json"))["projects"]
+        self.assertEqual(len(projects), 2)
+        self.assertEqual(projects[0]["root"], str(self.root))
+        self.assertIsNone(projects[0].get("profile"))
+        self.assertEqual(projects[1]["profile"], "career")
+
+        # Invalid profile names
+        self.run_cli("--profile", "../bad", "init", code=2)
+        self.run_cli("--profile", "a/b", "init", code=2)
+
+    def test_split_fork_and_extract(self):
+        self.write("topic.md", "# Topic\nDetails about backend.\n")
+        self.write("keep.md", "# Keep\nStays here.\n")
+        self.run_cli("context")
+
+        # Fork mode
+        self.run_cli("split", "--to", "forked")
+        self.assertTrue((self.root / ".memory.forked" / "topic.md").is_file())
+        self.assertTrue((self.root / ".memory.forked" / "keep.md").is_file())
+        self.assertIn("backend", self.run_cli("--profile", "forked", "search", "backend"))
+
+        # Extract mode
+        self.run_cli("split", "--to", "extracted", "--files", "topic.md")
+        self.assertTrue((self.root / ".memory.extracted" / "topic.md").is_file())
+        self.assertFalse((self.root / ".memory" / "topic.md").exists())
+        self.assertTrue((self.root / ".memory" / "keep.md").exists())
+        self.assertIn("backend", self.run_cli("--profile", "extracted", "search", "backend"))
+        self.assertIn("No matching", self.run_cli("search", "backend"))
+
+    def test_merge_profiles(self):
+        self.run_cli("--profile", "sub", "init")
+        sub_dir = self.root / ".memory.sub"
+        (sub_dir / "summary.md").write_text("# Sub Goal\n", encoding="utf-8")
+        (sub_dir / "decisions.md").write_text("# Decisions\n\n- Decided to use Rust.\n", encoding="utf-8")
+        (sub_dir / "lessons.md").write_text("# Lessons\n\n- Profiling was essential.\n", encoding="utf-8")
+        (sub_dir / "extra.md").write_text("# Extra\nAdditional note.\n", encoding="utf-8")
+
+        self.run_cli("merge", "--from", "sub", "--to", "default", "--delete-source")
+        self.assertFalse(sub_dir.exists())
+        self.assertTrue((self.root / ".memory" / "summary-sub.md").is_file())
+        self.assertIn("Sub Goal", (self.root / ".memory" / "summary-sub.md").read_text())
+        self.assertIn("Decided to use Rust", (self.root / ".memory" / "decisions.md").read_text())
+        self.assertIn("Profiling was essential", (self.root / ".memory" / "lessons.md").read_text())
+        self.assertTrue((self.root / ".memory" / "extra.md").is_file())
+        self.assertIn("Additional note", self.run_cli("search", "Additional"))
+
+        # Self-merge rejection
+        self.run_cli("merge", "--from", "default", "--to", "default", code=2)
 
 
 if __name__ == "__main__":
